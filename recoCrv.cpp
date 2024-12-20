@@ -319,7 +319,7 @@ class CrvEvent
 {
   public:
   CrvEvent(const std::string &runNumber, const int numberOfFebs, const int channelsPerFeb, const int numberOfSamples,
-           TTree *tree, TTree *recoTree, const TemperatureCorrections &temperatureCorrections, float PEcut);
+           TTree *tree, TTree *recoTree, TTree *recoTreeCoincs, const TemperatureCorrections &temperatureCorrections, float PEcut);
   void     Reconstruct(int entry, const Calibration &calib);
   TCanvas *GetCanvas(int feb, int channel) {return _canvas[feb*_channelsPerFeb+channel];}
   TH1F    *GetHistPEs(int i, int feb, int channel)
@@ -330,6 +330,7 @@ class CrvEvent
   TGraph  *GetHistTemperaturesFEB(int feb, int channel) {return _histTemperaturesFEB[feb*_channelsPerFeb+channel];}
   void     ReadChannelMap(const std::string &channelMapFile);
   void     TrackFit();
+  void     FindCoincidences();
   int      GetMaxedOutEvents(int feb, int channel) {return _maxedOut[feb*_channelsPerFeb+channel];}
 
   private:
@@ -347,6 +348,7 @@ class CrvEvent
 
   TTree *_tree;
   TTree *_recoTree;
+  TTree *_recoTreeCoincs;
 
   const TemperatureCorrections _tc;
 
@@ -399,11 +401,16 @@ class CrvEvent
   float _trackChi2;
   int   _trackPoints;
   float _trackPEs;
+
+  // Coincience parameters
+  float _coincPEs; // Pointer? Don't think so. 
+
+
 };
 CrvEvent::CrvEvent(const std::string &runNumber, const int numberOfFebs, const int channelsPerFeb, const int numberOfSamples,
-                   TTree *tree, TTree *recoTree, const TemperatureCorrections &temperatureCorrections, float PEcut) :
+                   TTree *tree, TTree *recoTree, TTree *recoTreeCoincs, const TemperatureCorrections &temperatureCorrections, float PEcut) :
                    _runNumber(runNumber), _numberOfFebs(numberOfFebs), _channelsPerFeb(channelsPerFeb), _numberOfSamples(numberOfSamples),
-                   _tree(tree), _recoTree(recoTree), _tc(temperatureCorrections), _PEcut(PEcut)
+                   _tree(tree), _recoTree(recoTree), _recoTreeCoincs(recoTreeCoincs), _tc(temperatureCorrections), _PEcut(PEcut)
 {
   std::ifstream configFile;
   configFile.open("config.txt");
@@ -499,6 +506,10 @@ CrvEvent::CrvEvent(const std::string &runNumber, const int numberOfFebs, const i
   recoTree->Branch("trackPoints", &_trackPoints, "trackPoints/I");
   recoTree->Branch("trackPEs", &_trackPEs, "trackPEs/F");
 
+
+  // Coincidence tree
+  recoTreeCoincs->Branch("PEs", &_coincPEs, "coincPEs/F");
+
   _canvas.resize(_numberOfFebs*_channelsPerFeb);
   _plot.resize(_numberOfFebs*_channelsPerFeb);
   _histPEs.resize(_numberOfFebs*_channelsPerFeb);
@@ -545,11 +556,11 @@ CrvEvent::CrvEvent(const std::string &runNumber, const int numberOfFebs, const i
 }
 void CrvEvent::Reconstruct(int entry, const Calibration &calib)
 {
-   CrvRecoEvent reco(_signalRegionStart,_signalRegionEnd);
+  CrvRecoEvent reco(_signalRegionStart,_signalRegionEnd);
 
   _tree->GetEntry(entry);
 
-if(entry%1000==0) std::cout<<"R "<<entry<<std::endl;
+  if(entry%1000==0) std::cout<<"R "<<entry<<std::endl;
 
   for(int i=0; i<_numberOfFebs; i++)
   {
@@ -669,14 +680,385 @@ if(entry%1000==0) std::cout<<"R "<<entry<<std::endl;
     }
   }
 
-  //Fit track, if channel map is provided
+  //Fit track and find coinciences, if channel map is provided
   if(!_channelMap.empty())
   {
     TrackFit();
+    // FindCoincidences();
   }
 
+  // std::cout<<"Hello"<<std::endl;
   _recoTree->Fill();
+  _recoTreeCoincs->Fill();
+
 }
+
+////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////
+
+// Hit object for clustering
+// Rewritten from the CrvHit struct in Offline
+class CrvHit {
+public:
+    // art::Ptr<CrvRecoPulse> _crvRecoPulse;
+    // CLHEP::Hep3Vector _pos;
+    float _x, _y;
+    int _sectorType;
+    float _time, _timePulseStart, _timePulseEnd;
+    float _PEs;
+    int _layer;
+    int _counter;
+    // int _SiPM;
+    // int _PEthreshold;
+    // double _maxTimeDifferenceAdjacentPulses;
+    // double _maxTimeDifference;
+    // double _minOverlapTimeAdjacentPulses;
+    // double _minOverlapTime;
+    // double _minSlope, _maxSlope, _maxSlopeDifference;
+    // int _coincidenceLayers;
+    // double _minClusterPEs;
+    mutable float _maxDistance; //initially set to initialClusterMaxDistance, which is just an estimate
+                                  //used for the initial clustering process (to keep the number of
+                                  //hit combinations down that need to be checked for coincidendes).
+                                  //_maxDistance is updated when the coindidences are checked
+                                  //(used for the final clustering process)
+
+    // Constructor 
+    CrvHit(
+      float x, 
+      float y,
+      int sectorType,
+      float time,
+      float timePulseStart,
+      float timePulseEnd,
+      float PEs,
+      int layer,
+      int counter,
+      float maxDistance) : 
+      _x(x),
+      _y(y),
+      _sectorType(sectorType),
+      _time(time),
+      _timePulseStart(timePulseStart),
+      _timePulseEnd(timePulseEnd),
+      _PEs(PEs),
+      _layer(layer),
+      _counter(counter),
+      _maxDistance(maxDistance)
+    {} 
+
+    // Helper to overload << operator and print CrvHit
+    friend std::ostream& operator<<(std::ostream& os, const CrvHit& hit) {
+        os << "x: " << hit._x << ", y: " << hit._y << ", sectorType: " << hit._sectorType
+           << ", time: " << hit._time << ", timePulseStart: " << hit._timePulseStart << ", timePulseEnd: " << hit._timePulseEnd
+           << ", PEs: " << hit._PEs << ", layer: " << hit._layer << ", counter: " << hit._counter 
+           << ", maxDistance: " << hit._maxDistance << ")";
+        return os;
+    }
+
+};
+
+void CrvEvent::FindCoincidences()
+{ 
+
+  // fcl parameters from CrvCoincidenceParameters.. 
+  // hardcode them here for now
+  bool _usePulseOverlaps = true;
+  float initialClusterMaxDistance = 250; // mm 
+
+  // This step requires positional information from the channel map
+
+  // Logic in Offline https://github.com/Mu2e/Offline/blob/main/CRVReco/src/CrvCoincidenceFinder_module.cc#L345
+  // 1. Loop thro' sectors 
+  // 2. Filter hits, do we need to do this? 
+  // 3. Distribute hits into clusters 
+  // 4. Loop through clusters 
+  // 5. Check hit cluster for coincidences (each readout side is independent) 
+  // 6. Create coincidence clusters 
+  // 7. Calculate and write coincidence cluster properties 
+
+  // Iterate through channel map and build a collection of hits for this event
+  std::vector<CrvHit> hits;
+  // ChannelMapType: feb,(channel1,channel2) --> side,(x,y)
+  // channel1 and channel2 are the counters, each counter gets 2 SiPMs
+  for(ChannelMapType::iterator channelIter=_channelMap.begin(); channelIter!=_channelMap.end(); ++channelIter)
+  {
+    // Get FEB ID
+    int feb=channelIter->first.first;
+
+    // Get channels
+    int channel1=channelIter->first.second.first;
+    int channel2=channelIter->first.second.second;
+    float side=channelIter->second.first;
+    float x=channelIter->second.second.first;
+    float y=channelIter->second.second.second;
+
+    if(feb<0 || feb>=_numberOfFebs) continue;  // feb not in event tree
+    if(channel1<0 || channel2<0 || channel1>=_channelsPerFeb || channel2>=_channelsPerFeb) continue;  //channels not in event tree
+
+    int index1=feb*_channelsPerFeb+channel1;  //used for _variable[i][j]
+    int index2=feb*_channelsPerFeb+channel2;  //used for _variable[i][j]
+
+    // Get sector 
+    // crvaging-019 and Offline convention
+    // * CRV-L-end is 3
+    // * CRV-T is 1
+    // * CRV-DS is 2
+
+    int sectorType=-1; 
+    if (feb == 0 || feb == 1) sectorType=2; 
+    else if (feb == 2 || feb == 3 || feb == 4 || feb == 5) sectorType=1;
+    else if (feb == 6 || feb == 7) sectorType=3;
+    else 
+    { 
+      std::cerr<<"FEB '"<<feb<<"' is not in the channel map!"<<std::endl;
+      return;
+    }
+  
+    // PEs for each channel
+    float PEs1 = _PEsTemperatureCorrected[index1];
+    float PEs2  = _PEsTemperatureCorrected[index2]; 
+
+    // Total PEs
+    float PEs  = PEs1+PEs2;
+
+    // Time
+    float time1 = _time[index1];
+    float time2 = _time[index2];
+    float time = ( time1 + time2 ) / 2; // Mean time for each channel
+
+    float timePulseStart1 = _recoStartBin[index1];
+    float timePulseStart2 = _recoStartBin[index2];
+    float timePulseStart = ( timePulseStart1 + timePulseStart2 ) / 2;
+
+    float timePulseEnd1 = _recoEndBin[index1];
+    float timePulseEnd2 = _recoEndBin[index2];
+    float timePulseEnd = ( timePulseEnd1 + timePulseEnd2 ) / 2;
+
+    // Get layer 
+    // TODO: read this from a configuration file
+
+    // crvaging-019: 
+    // * CRV-DS (FEB 0 & 1) go { 0 : 0-15, 1 : 16-31, 2: 32-47, 3: 48-63 }
+    // * CRV-T & CRV-L-end (FEB 2-7):
+    // ** FEB 2, 4, 6: {0 : 0-31, 1 : 32-63}  
+    // ** FEB 3, 5, 7: {2 : 0-31, 3 : 32-63}  
+
+    int layer=-1; 
+    if (feb == 0 || feb == 1)
+    {  
+      if (channel1 < 15) layer = 0; 
+      else if ( (channel1 >= 16) && (channel1 < 31) ) layer = 1;
+      else if ( (channel1 >= 32) && (channel1 < 47) ) layer = 2;
+      else if ( (channel1 >= 48) && (channel1 < 63) ) layer = 3;
+      else 
+      {
+        std::cerr<<"nchannel1 '"<<channel1<<"' in FEB '"<<feb<<"' not valid!"<<std::endl;
+        return;
+      }
+    } 
+    else if (feb == 2 || feb == 4 || feb == 6)
+    {
+      if (channel1 < 31) layer = 0; 
+      else if (channel1 > 31) layer= 1; 
+      else 
+      {
+        std::cerr<<"nchannel1 '"<<channel1<<"' in FEB '"<<feb<<"' not valid!"<<std::endl;
+        return;
+      }
+    }
+    else if (feb == 3 || feb == 5 || feb == 7) 
+    {
+      if (channel1 < 31) layer = 2; 
+      else if (channel1 > 31) layer= 3; 
+      else
+      { 
+        std::cerr<<"nchannel1 '"<<channel1<<"' in FEB '"<<feb<<"' not valid!"<<std::endl; 
+      }
+    }
+    else 
+    {
+      std::cerr<<"FEB '"<<feb<<"' is not in the channel map!"<<std::endl;
+      return;
+    }
+
+    // Get counter number
+    // May differ per FEB? 
+    // Not sure what this is used for tbh
+    int counter = channel1 / 2; 
+
+    float maxDistance = initialClusterMaxDistance; 
+
+    if (true) { 
+      std::cout<<"\n-----------------------------"<<std::endl;
+      std::cout<<"feb: "<<feb<<std::endl;
+      std::cout<<"channel1: "<<channel1<<std::endl;
+      std::cout<<"channel2: "<<channel2<<std::endl;
+      std::cout<<"counter: "<<counter<<std::endl;
+      // std::cout<<"x: "<<x<<std::endl;
+      // std::cout<<"y: "<<y<<std::endl;
+      // std::cout<<"PEs: "<<PEs<<std::endl;
+      // std::cout<<"timePulseStart1: "<<timePulseStart1<<std::endl;
+      // std::cout<<"timePulseStart2: "<<timePulseStart2<<std::endl;
+      // std::cout<<"timePulseStart: "<<timePulseStart<<std::endl;
+      // std::cout<<"channel2: "<<channel2<<std::endl;
+      std::cout<<"-----------------------------"<<std::endl;
+    }
+
+    // Filtering
+    if(PEs<_PEcut) continue; // rely on default 5 PEs cut for now, Offline 8-12 depending on the sector
+
+    // Store hit info
+    hits.emplace_back(
+      x, y, 
+      sectorType,
+      time, timePulseStart, timePulseEnd,
+      PEs,
+      layer,
+      counter,
+      maxDistance); 
+  
+  }
+
+
+  // Print out CRV hits
+  std::cout<<std::endl;
+  for (auto &hit : hits) std::cout<<hit<<std::endl;
+
+  // // Cluster the hits
+  // std::vector<std::vector<CrvHit>> clusters;
+  // while(!hits.empty()) //run through clustering processes until all hits are distributed into clusters
+  // {
+  //   clusters.resize(clusters.size()+1); // add a new cluster
+  //   std::vector<CrvHit> &cluster = clusters.back(); // Get the new cluster
+
+  //   // Need to loop several times to check the unused hits until the cluster size remains stable
+  //   size_t lastClusterSize=0;
+  //   do
+  //   { 
+  //     lastClusterSize=cluster.size();
+  //     for(auto hitsIter=hits.begin(); hitsIter!=hits.end(); ) // Iterate through base hits
+  //     {
+  //       if(cluster.empty())
+  //         {
+  //           //first element of current cluster
+  //           //gets moved from list of hits to the current cluster
+  //           cluster.push_back(*hitsIter);
+  //           hitsIter=hits.erase(hitsIter);
+  //         }
+  //         else
+  //         { 
+  //           bool erasedHit=false;
+  //           for(auto clusterIter=cluster.begin(); clusterIter!=cluster.end(); ++clusterIter) // Iterate through hits in this cluster
+
+  //           //check whether current hit satisfies time and distance condition w.r.t. to any hit of current cluster
+  //           double maxDistance = std::max(hitsIter->_maxDistance,clusterIter->_maxDistance);
+
+  //           if(_usePulseOverlaps)
+  //           {
+  //             if((std::fabs(hitsIter->_x-clusterIter->_x)<=maxDistance) &&
+  //                 (hitsIter->_timePulseEnd-clusterIter->_timePulseStart>clusterMinOverlapTime) &&
+  //                 (clusterIter->_timePulseEnd-hitsIter->_timePulseStart>clusterMinOverlapTime))
+  //             {
+  //               //this hit satisfied the conditions
+  //               //move it from list of hits to the current cluster
+  //               cluster.push_back(*hitsIter);
+  //               hitsIter=hits.erase(hitsIter);
+  //               erasedHit=true;
+  //               break;  //no need for more comparisons with other hits in current cluster, go to the next hit in list of hits
+  //             }
+  //           }
+  //           else
+  //           {
+  //             if((std::fabs(hitsIter->_x-clusterIter->_x)<=maxDistance) &&
+  //                 (std::fabs(hitsIter->_time-clusterIter->_time)<clusterMaxTimeDifference))
+  //             {
+  //               //this hit satisfied the conditions
+  //               //move it from list of hits to the current cluster
+  //               cluster.push_back(*hitsIter);
+  //               hitsIter=hits.erase(hitsIter);
+  //               erasedHit=true;
+  //               break;  //no need for more comparisons with other hits in current cluster, go to the next hit in list of hits
+  //             }
+  //           }
+  //         }
+
+
+  //     }
+
+  //   }
+
+  // }
+      // clusters.resize(clusters.size()+1); //add a new cluster
+      // std::vector<CrvHit> &cluster = clusters.back();
+
+      // //need to loop several times to check the unused hits until the cluster size remains stable
+      // size_t lastClusterSize=0;
+      // do
+      // {
+      //   lastClusterSize=cluster.size();
+
+        // for(auto hitsIter=hits.begin(); hitsIter!=hits.end(); )
+        // {
+        //   if(cluster.empty())
+        //   {
+        //     //first element of current cluster
+        //     //gets moved from list of hits to the current cluster
+        //     cluster.push_back(*hitsIter);
+        //     hitsIter=hits.erase(hitsIter);
+        //   }
+        //   else
+        //   {
+        //     //check whether current hit satisfies time and distance condition w.r.t. to any hit of current cluster
+        //     bool erasedHit=false;
+        //     for(auto clusterIter=cluster.begin(); clusterIter!=cluster.end(); ++clusterIter)
+        //     {
+        //       double maxDistance = std::max(hitsIter->_maxDistance,clusterIter->_maxDistance);
+        //       if(_usePulseOverlaps)
+        //       {
+        //         if((std::fabs(hitsIter->_x-clusterIter->_x)<=maxDistance) &&
+        //            (hitsIter->_timePulseEnd-clusterIter->_timePulseStart>clusterMinOverlapTime) &&
+        //            (clusterIter->_timePulseEnd-hitsIter->_timePulseStart>clusterMinOverlapTime))
+        //         {
+        //           //this hit satisfied the conditions
+        //           //move it from list of hits to the current cluster
+        //           cluster.push_back(*hitsIter);
+        //           hitsIter=hits.erase(hitsIter);
+        //           erasedHit=true;
+        //           break;  //no need for more comparisons with other hits in current cluster, go to the next hit in list of hits
+        //         }
+//               }
+//               else
+//               {
+//                 if((std::fabs(hitsIter->_x-clusterIter->_x)<=maxDistance) &&
+//                    (std::fabs(hitsIter->_time-clusterIter->_time)<clusterMaxTimeDifference))
+//                 {
+//                   //this hit satisfied the conditions
+//                   //move it from list of hits to the current cluster
+//                   cluster.push_back(*hitsIter);
+//                   hitsIter=hits.erase(hitsIter);
+//                   erasedHit=true;
+//                   break;  //no need for more comparisons with other hits in current cluster, go to the next hit in list of hits
+//                 }
+//               }
+//             } //loop over all hits in the cluster (for comparison with current hit)
+
+//             if(!erasedHit) ++hitsIter;
+
+//           } //cluster not empty
+//         } //loop over all undistributed hits
+
+//       } while(lastClusterSize!=cluster.size()); //loop until cluster does not change anymore
+
+//     } //loop until all hits in list of hits are distributed into clusters
+//   } //end finder clusters
+
+} // End FindCoincidences
+
+
+////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////
+
 
 void CrvEvent::TrackFit()
 {
@@ -710,6 +1092,16 @@ void CrvEvent::TrackFit()
     float PE2     = _PEsTemperatureCorrected[index2];
     if(PE1<=0 || _fitStatus[index1]==0) PE1=0;
     if(PE2<=0 || _fitStatus[index2]==0) PE2=0;
+
+    int sectorType=-1; 
+    if (feb == 0 || feb == 1) sectorType=2; 
+    else if (feb == 2 || feb == 3 || feb == 4 || feb == 5) sectorType=1;
+    else if (feb == 6 || feb == 7) sectorType=3;
+    else 
+    { 
+      std::cerr<<"FEB '"<<feb<<"' is not in the channel map!"<<std::endl;
+      return;
+    }
 
     //collect information for the fit
     //uses hit information from both sides
@@ -1562,6 +1954,7 @@ void process(const std::string &runNumber, const std::string &inFileName, const 
   recoFile.mkdir("plots");
   TTree *recoTree = new TTree("run","run");
   TTree *recoTreeSpill = treeSpills->CloneTree();
+  TTree *recoTreeCoincs = new TTree("coincs","coincs");
 
   int numberOfFebs;
   int channelsPerFeb;
@@ -1572,7 +1965,7 @@ void process(const std::string &runNumber, const std::string &inFileName, const 
   treeSpills->GetEntry(0);  //to read the numberOfFebs, channelsPerFeb, and numberOfSamples
 
   Calibration calib(calibFileName, numberOfFebs, channelsPerFeb);
-  CrvEvent event(runNumber, numberOfFebs, channelsPerFeb, numberOfSamples, tree, recoTree, tc, PEcut);
+  CrvEvent event(runNumber, numberOfFebs, channelsPerFeb, numberOfSamples, tree, recoTree, recoTreeCoincs, tc, PEcut);
   if(channelMapFile!="") event.ReadChannelMap(channelMapFile);
 
   int nEvents = tree->GetEntries();
@@ -1583,7 +1976,11 @@ void process(const std::string &runNumber, const std::string &inFileName, const 
   TCanvas c0;
   c0.Print(Form("%s[", pdfFileName.c_str()), "pdf");
 
-  for(int i=0; i<nEvents; i++) event.Reconstruct(i, calib);
+  for(int i=0; i<nEvents; i++)
+  {
+    event.Reconstruct(i, calib);
+    if (i > 0.05*nEvents) break; // testing (reconstruct 5% of events)
+  }
 
   std::vector<float> mpvs[2];
   std::vector<float> fwhms[2];
@@ -1604,7 +2001,7 @@ void process(const std::string &runNumber, const std::string &inFileName, const 
       for(int i=0; i<2; ++i)
       {
         event.GetCanvas(feb, channel)->cd(i+1);
-//        gPad->SetLogy(1);
+        // gPad->SetLogy(1);
         h[i]=event.GetHistPEs(i,feb,channel);
 
         float mpv=0;
@@ -1685,6 +2082,7 @@ void process(const std::string &runNumber, const std::string &inFileName, const 
 
   recoTree->Write("", TObject::kOverwrite);
   recoTreeSpill->Write("", TObject::kOverwrite);
+  recoTreeCoincs->Write("", TObject::kOverwrite);
 
   //store a copy of the reco file without the adc
   recoTree->SetBranchStatus("adc",0);
@@ -1851,6 +2249,9 @@ int main(int argc, char **argv)
   std::string txtFileName;
   std::string dqmFileName;
   makeFileNames(runNumber, inFileName, calibFileName, recoFileName, recoFileName2, pdfFileName, txtFileName, dqmFileName);
+
+  // Hardcode channel map for testing
+  channelMapFile = "eventdisplay/channelMapCrvAging019Adjusted.txt";
 
   process(runNumber, inFileName, calibFileName, recoFileName, recoFileName2, pdfFileName, txtFileName, dqmFileName, usePoisson, tc, channelMapFile, PEcut);
 
