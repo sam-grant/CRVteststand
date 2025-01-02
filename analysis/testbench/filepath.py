@@ -3,6 +3,7 @@ import geometry_constants
 import numpy as np
 
 # preparation of environment 
+os.system("source /cvmfs/mu2e.opensciencegrid.org/setupmu2e-art.sh")
 os.system("setup mu2efiletools")
 os.system("setup dhtools")
 
@@ -313,13 +314,18 @@ datatag = { #updated to 1420. #FIXME: tag previous runs
               "type":"led", 
               "config":"crvaging-019",
               "run#":[2093, 2094, 2095, 2096, 2097],
+              "bulk":[-25, 0, +25, +50, +75]},
+          "bulk_scan_crvaging020": {
+              "type":"led", 
+              "config":"crvaging-020",
+              "run#":[2107, 2108, 2109, 2110, 2111],
               "bulk":[-25, 0, +25, +50, +75]}
 }
 
 # temperature scan data tags, exist for compatibility reasons
 ds_temp_scan_cosmics = ["LED_temp_scan_cosmics"]
 ds_temp_scan_led = ["LED_temp_scan"]
-    
+
 def getfilelist(taglist, filetype = "recoROOT", passVer = 1): # argument can be a list of keys from the above dictionary or run numbers
     filenamelist = []
     runnumlist = []

@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 import ROOT
-from ROOT import gROOT, gStyle, gDirectory, gPad
+from ROOT import gROOT, gStyle, gDirectory, gPad, TFile
 
 from array import array
 
@@ -19,7 +19,7 @@ import filepath
 
 import pandas as pd
 
-def PortToDF(fileList, additional_dict = None, verbose = False):
+def PortToDF(fileList, additional_dict = None, verbose = False, xroot=False):
     df = pd.DataFrame()
 
     for index, filename in enumerate(fileList):
@@ -28,7 +28,13 @@ def PortToDF(fileList, additional_dict = None, verbose = False):
         runNum = filepath.filenameparser(filename, 'run') 
         subrunNum = filepath.filenameparser(filename, 'subrun') 
 
-        fFile = ROOT.TFile(filename, "READ")
+        # Open file 
+        fFile = None
+        if xroot: 
+            fFile = utils.read_file_xroot(filename, quiet=True)
+        else:
+            fFile = TFile(filename, "READ")
+            
         runSummarytree = fFile.Get("runSummary")
         spilltree = fFile.Get("spills")
         spilltree.GetEntry(0)

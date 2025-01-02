@@ -25,6 +25,7 @@ import constants, geometry_constants
 import crv_event, crv_spill
 import filepath
 import manualDQC
+import subprocess
 
 ################################## UTILS FOR TIME PLOT ######################################
 
@@ -60,7 +61,46 @@ def smoothing(x, nSmooth, axis): # running average using nSmooth points
         sys.exit("Error: utils.smoothing: bad axis argument")
     return x_smoothed
 
-def plot_dqm(filename_list, plot_dict, dqmFilter = '', dqmVerbose = False, nSmooth = 1, show = False, title = ';;', isRaw = False): 
+def read_file_xroot(filename, quiet=False): 
+    """Read file with xroot"""
+    if True:
+        print(f'---> Reading file: {filename}')
+    try:
+        # Setup commands
+        commands = 'source /cvmfs/mu2e.opensciencegrid.org/setupmu2e-art.sh; muse setup ops;'
+        commands += f'echo {filename} | mdh print-url -s root -'
+        # Execute commands with timeout
+        filename = subprocess.check_output(commands, shell=True, universal_newlines=True, timeout=30)  # 30s timeout
+        if not quiet:
+            print(f'\n---> Created xroot url:\n{filename.strip()}')
+            print('---> Opening file with ROOT...') 
+        # Open the file 
+        fFile = TFile.Open(filename.strip())
+        if fFile and fFile.IsOpen():
+            if not quiet: 
+                print('Done!')
+            return fFile
+        else:
+            raise OSError("Failed to open file with TFile.")
+            
+    except (OSError, subprocess.TimeoutExpired) as e:
+        # Handle timeout or error
+        print(f'\n----> Exception while opening {filename}!\n{e}\n---> Retrying locally.')
+        commands = 'source /cvmfs/mu2e.opensciencegrid.org/setupmu2e-art.sh; muse setup ops;'
+        commands += f'echo {filename} | mdh copy-file -s tape -l local -'
+        # Execute local copy
+        local_file = subprocess.check_output(commands, shell=True, universal_newlines=True)
+        
+        fFile = TFile.Open(local_file.strip())
+        if fFile and fFile.IsOpen():
+            if not quiet: 
+                print('Done!')
+            return fFile
+        else:
+            raise OSError("Failed to open local file with TFile.")
+
+
+def plot_dqm(filename_list, plot_dict, dqmFilter = '', dqmVerbose = False, nSmooth = 1, show = False, title = ';;', isRaw = False, xroot=False): 
     
     # plot_dict is a dictionary of {"keyword":[["attribute[slicing]"],[next plot]]}; no omission is allowed if slicing is used
     # keyword is the selection criteria in the file name; if keyword is not an attribute name, 
@@ -110,12 +150,18 @@ def plot_dqm(filename_list, plot_dict, dqmFilter = '', dqmVerbose = False, nSmoo
                 plotData[k].update({v:[]})
         for filename in filename_list:
             if k in filename.split('/')[-1] or k == '*':
-                fFile = TFile(filename, "READ")
+                # Open file 
+                fFile = None
+                if xroot: 
+                    fFile = read_file_xroot(filename, quiet=True)
+                else:
+                    fFile = TFile(filename, "READ")
+                    
                 if 'crvaging' in filename:
                     isCosmic = True
                 else:
                     isCosmic = False
-                print ("Reading file: "+filename.split('/')[-1])
+                # print ("Reading file: "+filename.split('/')[-1])
                 runtree = fFile.Get("run")
                 spilltree = fFile.Get("spills")
                 iEvent = 0
