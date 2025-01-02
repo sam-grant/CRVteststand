@@ -313,6 +313,11 @@ datatag = { #updated to 1420. #FIXME: tag previous runs
               "type":"led", 
               "config":"crvaging-019",
               "run#":[2093, 2094, 2095, 2096, 2097],
+              "bulk":[-25, 0, +25, +50, +75]},
+          "bulk_scan_crvaging020": {
+              "type":"led", 
+              "config":"crvaging-020",
+              "run#":[2107, 2108, 2109, 2110, 2111],
               "bulk":[-25, 0, +25, +50, +75]}
 }
 
